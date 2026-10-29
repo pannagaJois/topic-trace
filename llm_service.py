@@ -1,24 +1,28 @@
 """
 LLM Service Module for TopicTrace.
 Handles syllabus parsing into hierarchical JSON and textbook-grounded study note generation using Google Gemini.
-Includes automatic retries, backoff, and fallback models for transient high-demand (503/429) errors.
+Includes explicit timeouts, zero-thinking speed optimization for JSON, automatic retries, and fallback models.
 """
 
 import json
 import re
 import time
 from typing import List, Dict, Any, Optional, Callable
+import httpx
 from google import genai
 from google.genai import types, errors
 
 
-def init_gemini_client(api_key: Optional[str] = None) -> genai.Client:
+def init_gemini_client(api_key: Optional[str] = None, timeout: float = 45.0) -> genai.Client:
     """
-    Initializes and returns a Google GenAI Client.
+    Initializes and returns a Google GenAI Client with an explicit network timeout.
     """
     if not api_key:
         raise ValueError("Gemini API Key is required. Please provide it in the sidebar or via GEMINI_API_KEY environment variable.")
-    return genai.Client(api_key=api_key)
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=timeout),
+    )
 
 
 def _clean_json_response(raw_text: str) -> str:
@@ -41,36 +45,42 @@ def _clean_json_response(raw_text: str) -> str:
 def resilient_generate_content(
     client: genai.Client,
     contents: str,
-    primary_model: str = "gemini-3.8-flash",
+    primary_model: str = "gemini-2.0-flash",
     config: Optional[types.GenerateContentConfig] = None,
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    Executes generate_content with automatic retries, exponential backoff,
-    and automatic fallback to alternative Gemini models if Google servers report 503 UNAVAILABLE or 429.
+    Executes generate_content with explicit timeouts, automatic retries,
+    and automatic fallback to alternative Gemini models if 503 UNAVAILABLE, 429, or timeouts occur.
     """
-    # Priority order of models to try if the primary encounters high demand
     candidates = [primary_model]
-    for backup in ["gemini-2.0-flash", "gemini-3.8-pro", "gemini-1.5-flash"]:
+    for backup in ["gemini-2.0-flash", "gemini-3.8-flash", "gemini-1.5-flash", "gemini-3.8-pro"]:
         if backup not in candidates:
             candidates.append(backup)
 
     last_error = None
+    current_config = config
 
     for model_name in candidates:
-        max_retries = 2
-        for attempt in range(max_retries):
+        max_attempts = 2
+        for attempt in range(max_attempts):
             try:
+                if status_callback and attempt == 0 and model_name != candidates[0]:
+                    status_callback(f"Connecting to model: {model_name}...")
+
                 response = client.models.generate_content(
                     model=model_name,
                     contents=contents,
-                    config=config,
+                    config=current_config,
                 )
                 return response.text or ""
+
             except Exception as e:
                 err_str = str(e).lower()
+                is_timeout = isinstance(e, (httpx.TimeoutException, TimeoutError)) or "timeout" in err_str
                 is_transient = (
-                    "503" in err_str
+                    is_timeout
+                    or "503" in err_str
                     or "unavailable" in err_str
                     or "high demand" in err_str
                     or "429" in err_str
@@ -78,20 +88,25 @@ def resilient_generate_content(
                 )
                 last_error = e
 
+                # If thinking config is unsupported by this model, retry immediately without it
+                if "thinking" in err_str and current_config and current_config.thinking_config:
+                    current_config = types.GenerateContentConfig(temperature=current_config.temperature or 0.2)
+                    continue
+
                 if is_transient:
-                    wait_time = (attempt + 1) * 2
-                    if attempt < max_retries - 1:
+                    wait_time = 2 * (attempt + 1)
+                    if attempt < max_attempts - 1:
                         if status_callback:
-                            status_callback(f"⚠️ {model_name} is experiencing high demand. Retrying in {wait_time}s...")
+                            reason = "timed out" if is_timeout else "busy"
+                            status_callback(f"⚠️ {model_name} was {reason}. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        # If retries for this model are exhausted, announce switch to backup
                         if status_callback and model_name != candidates[-1]:
                             next_model = candidates[candidates.index(model_name) + 1]
-                            status_callback(f"⚠️ {model_name} busy. Automatically switching to backup: {next_model}...")
+                            status_callback(f"⚠️ {model_name} not responding. Switching to backup model: {next_model}...")
                         time.sleep(1)
                 else:
-                    # Non-transient errors (such as 401 invalid key, bad request) raise immediately
+                    # Authentication or bad argument error - don't retry, raise immediately
                     raise e
 
     raise last_error if last_error else RuntimeError("Model generation failed across all available fallback models.")
@@ -107,7 +122,14 @@ def parse_syllabus_to_topics(
 ) -> List[Dict[str, Any]]:
     """
     Prompts the LLM to parse raw syllabus text into a clean hierarchical list of topics/subtopics.
+    Uses thinking_budget=0 for instant response and caps syllabus text if too large.
     """
+    # Defensive truncation in case an entire textbook was accidentally uploaded as syllabus
+    max_chars = 50000
+    cleaned_syllabus = syllabus_text[:max_chars].strip()
+    if len(syllabus_text) > max_chars and status_callback:
+        status_callback(f"ℹ️ Syllabus is very large (~{len(syllabus_text):,} chars). Parsing first 50,000 chars for structure...")
+
     prompt = f"""
 You are an expert curriculum analyzer.
 Your task is to parse the following raw syllabus text into a clean, hierarchical JSON list of units/modules, topics, and subtopics.
@@ -130,16 +152,20 @@ Strict Requirements:
 4. Ensure each topic has a clear "name" and an array of "subtopics" (can be empty if none specified).
 
 RAW SYLLABUS TEXT:
-{syllabus_text}
+{cleaned_syllabus}
 """
+
+    # Turn off thinking budget to avoid multi-minute reasoning delays on Gemini 2.5/3.x models
+    config = types.GenerateContentConfig(
+        temperature=0.1,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+    )
 
     response_text = resilient_generate_content(
         client=client,
         contents=prompt,
         primary_model=model,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-        ),
+        config=config,
         status_callback=status_callback,
     )
 

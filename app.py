@@ -23,6 +23,7 @@ importlib.reload(exporter)
 
 from extractor import extract_text_from_pdf
 from llm_service import (
+    get_local_llm,
     init_gemini_client,
     init_groq_client,
     parse_syllabus_to_topics,
@@ -96,15 +97,26 @@ if "notes_editor_content" not in st.session_state:
 
 # Sidebar Configuration
 with st.sidebar:
-    st.title("⚙️ Settings & Keys")
+    st.title("⚙️ Settings & Engine")
     
     provider_choice = st.radio(
-        "Choose AI Provider (100% Free)",
-        options=["Google Gemini", "Groq"],
-        help="Google Gemini offers large context windows. Groq offers lightning-fast (~500 tokens/sec) inference.",
+        "Choose AI Engine",
+        options=[
+            "🖥️ Local Model (Qwen 2.5 1.5B - Offline & Free)",
+            "☁️ Google Gemini",
+            "⚡ Groq",
+        ],
+        index=0,
+        help="Local model runs directly on your CPU with zero API keys or internet requirements.",
     )
 
-    if provider_choice == "Google Gemini":
+    if provider_choice.startswith("🖥️ Local"):
+        st.success("🟢 Local Qwen 2.5 1.5B Active")
+        st.caption("Runs 100% locally on your CPU via llama-cpp-python. No API key or internet needed!")
+        api_key_input = "local_mode"
+        model_choice = "qwen2.5-1.5b-instruct"
+
+    elif "Gemini" in provider_choice:
         env_api_key = os.getenv("GEMINI_API_KEY", "")
         api_key_input = st.text_input(
             "Google Gemini API Key",
@@ -124,6 +136,7 @@ with st.sidebar:
             index=0,
             help="gemini-2.0-flash is recommended for ultra-fast, reliable study notes generation.",
         )
+
     else:  # Groq
         env_api_key = os.getenv("GROQ_API_KEY", "")
         api_key_input = st.text_input(
@@ -140,13 +153,15 @@ with st.sidebar:
 
         model_choice = st.selectbox(
             "Select Groq Model",
-            options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+            options=["llama-3.3-70b-versatile"],
             index=0,
-            help="Llama 3.3 70B runs on Groq LPUs at ~500 tokens/sec with near-zero latency.",
+            help="Llama 3.3 70B runs on Groq LPUs at ~500 tokens/sec.",
         )
 
     def get_active_client(provider: str, key: str):
-        if provider == "Groq":
+        if provider.startswith("🖥️ Local"):
+            return get_local_llm()
+        elif "Groq" in provider:
             return init_groq_client(key)
         return init_gemini_client(key)
 
@@ -203,10 +218,10 @@ if syllabus_file and textbook_file:
     st.markdown("### 1. Hierarchical Topic Parsing")
     
     if st.session_state.parsed_units is None:
-        st.write("Extract the structured topic tree from your syllabus using Gemini.")
+        st.write("Extract the structured topic tree from your syllabus.")
         if st.button("🚀 Parse Syllabus Topics", type="primary"):
             if not api_key_input:
-                st.error("Please provide a Gemini API Key in the sidebar.")
+                st.error("Please configure your AI engine in the sidebar.")
             else:
                 try:
                     status_banner = st.empty()
@@ -279,7 +294,7 @@ if syllabus_file and textbook_file:
 
         if start_gen:
             if not api_key_input:
-                st.error("Please provide a Gemini API Key in the sidebar.")
+                st.error("Please configure your AI engine in the sidebar.")
             else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()

@@ -128,7 +128,7 @@ def resilient_generate_content(
     Executes text generation using Local Model, Google Gemini, or Groq.
     """
     # 1. Local Offline Model
-    if provider.startswith("Local"):
+    if "Local" in provider or isinstance(client, Llama):
         local_llm = client if isinstance(client, Llama) else get_local_llm()
         chatml_prompt = f"<|im_start|>user\n{contents}<|im_end|>\n<|im_start|>assistant\n"
         out = local_llm(
@@ -140,7 +140,7 @@ def resilient_generate_content(
         return out["choices"][0]["text"].strip()
 
     # 2. Groq Cloud
-    if provider == "Groq":
+    elif "Groq" in provider:
         groq_candidates = [primary_model]
         for alt in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
             if alt not in groq_candidates:
@@ -230,7 +230,7 @@ def parse_syllabus_to_topics(
     """
     Prompts the LLM to parse raw syllabus text into a clean hierarchical JSON list of topics/subtopics.
     """
-    max_chars = 25000 if provider.startswith("Local") else 40000
+    max_chars = 25000 if ("Local" in provider or isinstance(client, Llama)) else 40000
     cleaned_syllabus = syllabus_text[:max_chars].strip()
 
     prompt = f"""You are an expert curriculum analyzer. Parse the following syllabus into a JSON array of units and topics.
@@ -254,7 +254,7 @@ SYLLABUS TEXT:
     config = gemini_types.GenerateContentConfig(
         temperature=0.1,
         thinking_config=gemini_types.ThinkingConfig(thinking_budget=0),
-    ) if provider == "Google Gemini" else None
+    ) if ("Google" in provider or "Gemini" in provider) else None
 
     response_text = resilient_generate_content(
         client=client,
@@ -306,7 +306,7 @@ def generate_notes_for_topic(
     Generates study notes for a single topic and its subtopics, strictly grounded on the textbook text.
     """
     subtopics_str = ", ".join(subtopics) if subtopics else "None specified"
-    max_context_chars = 30000 if provider.startswith("Local") else 100000
+    max_context_chars = 30000 if ("Local" in provider or isinstance(client, Llama)) else 100000
     relevant_context = get_relevant_textbook_context(textbook_text, topic_name, subtopics, max_chars=max_context_chars)
 
     prompt = f"""You are an academic study notes generator.
@@ -333,7 +333,7 @@ FORMAT YOUR RESPONSE AS:
     config = gemini_types.GenerateContentConfig(
         temperature=0.2,
         thinking_config=gemini_types.ThinkingConfig(thinking_budget=0),
-    ) if provider == "Google Gemini" else None
+    ) if ("Google" in provider or "Gemini" in provider) else None
 
     response_text = resilient_generate_content(
         client=client,
@@ -377,7 +377,7 @@ def generate_all_notes_parallel(
         return idx, item["topic"], note
 
     # Local model is optimized with 1-2 workers on CPU
-    actual_workers = 1 if provider.startswith("Local") else max_workers
+    actual_workers = 1 if ("Local" in provider or isinstance(client, Llama)) else max_workers
 
     completed_count = 0
     with ThreadPoolExecutor(max_workers=actual_workers) as executor:

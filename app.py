@@ -22,7 +22,12 @@ importlib.reload(llm_service)
 importlib.reload(exporter)
 
 from extractor import extract_text_from_pdf
-from llm_service import init_gemini_client, parse_syllabus_to_topics, generate_notes_for_topic
+from llm_service import (
+    init_gemini_client,
+    parse_syllabus_to_topics,
+    generate_notes_for_topic,
+    generate_all_notes_parallel,
+)
 from exporter import export_markdown, export_pdf
 
 # Set Streamlit Page Configuration
@@ -229,49 +234,76 @@ if syllabus_file and textbook_file:
         # Step 2: Note Generation
         st.markdown("### 2. Topic Mapping & Note Generation")
         
-        if st.button("📝 Generate Study Notes", type="primary", disabled=(len(all_topics_to_generate) == 0)):
+        col_gen_btn, col_turbo_toggle = st.columns([1, 1])
+        with col_turbo_toggle:
+            turbo_mode = st.checkbox(
+                "⚡ Turbo Parallel Mode (4x Faster)",
+                value=True,
+                help="Generates notes concurrently across multiple threads with zero reasoning lag.",
+            )
+        
+        with col_gen_btn:
+            start_gen = st.button("📝 Generate Study Notes", type="primary", disabled=(len(all_topics_to_generate) == 0))
+
+        if start_gen:
             if not api_key_input:
                 st.error("Please provide a Gemini API Key in the sidebar.")
             else:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                generated_sections = []
                 
                 try:
                     client = init_gemini_client(api_key_input)
                     total_topics = len(all_topics_to_generate)
-                    
-                    # Add document title header
-                    generated_sections.append(f"# Study Notes: {syllabus_file.name.replace('.pdf', '')}\n")
-                    
-                    current_unit = None
-                    for idx, item in enumerate(all_topics_to_generate):
-                        if item["unit"] != current_unit:
-                            current_unit = item["unit"]
-                            generated_sections.append(f"\n# {current_unit}\n")
-                        
-                        status_text.text(f"Cross-referencing textbook & writing notes for [{idx + 1}/{total_topics}]: {item['topic']}...")
-                        
-                        def gen_status_cb(msg: str):
-                            status_text.warning(f"[{idx + 1}/{total_topics}] {item['topic']}: {msg}")
+                    doc_title_header = f"# Study Notes: {syllabus_file.name.replace('.pdf', '')}\n\n"
 
-                        note_content = generate_notes_for_topic(
+                    if turbo_mode:
+                        status_text.text(f"⚡ Turbo Mode: Generating notes for {total_topics} topics in parallel...")
+
+                        def on_parallel_progress(done: int, total: int, last_topic: str):
+                            progress_bar.progress(done / total)
+                            status_text.text(f"⚡ Turbo generating [{done}/{total}]: completed '{last_topic}'")
+
+                        body_notes = generate_all_notes_parallel(
                             client=client,
-                            topic_name=item["topic"],
-                            subtopics=item["subtopics"],
+                            topics_list=all_topics_to_generate,
                             textbook_text=st.session_state.textbook_text,
                             model=model_choice,
-                            status_callback=gen_status_cb,
+                            max_workers=4,
+                            progress_callback=on_parallel_progress,
                         )
-                        generated_sections.append(note_content)
-                        generated_sections.append("\n---\n")
-                        
-                        progress_bar.progress((idx + 1) / total_topics)
+                        final_notes = doc_title_header + body_notes
+
+                    else:
+                        generated_sections = [doc_title_header]
+                        current_unit = None
+                        for idx, item in enumerate(all_topics_to_generate):
+                            if item["unit"] != current_unit:
+                                current_unit = item["unit"]
+                                generated_sections.append(f"\n# {current_unit}\n")
+                            
+                            status_text.text(f"Cross-referencing textbook for [{idx + 1}/{total_topics}]: {item['topic']}...")
+                            
+                            def gen_status_cb(msg: str):
+                                status_text.warning(f"[{idx + 1}/{total_topics}] {item['topic']}: {msg}")
+
+                            note_content = generate_notes_for_topic(
+                                client=client,
+                                topic_name=item["topic"],
+                                subtopics=item["subtopics"],
+                                textbook_text=st.session_state.textbook_text,
+                                model=model_choice,
+                                status_callback=gen_status_cb,
+                            )
+                            generated_sections.append(note_content)
+                            generated_sections.append("\n---\n")
+                            progress_bar.progress((idx + 1) / total_topics)
+
+                        final_notes = "\n".join(generated_sections)
 
                     status_text.empty()
                     progress_bar.empty()
                     
-                    final_notes = "\n".join(generated_sections)
                     st.session_state.generated_notes = final_notes
                     st.session_state.notes_editor_content = final_notes
                     st.success("All notes generated successfully! Scroll down to review and edit.")

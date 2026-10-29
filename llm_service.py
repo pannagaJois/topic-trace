@@ -1,8 +1,7 @@
 """
 LLM Service Module for TopicTrace.
-Handles syllabus parsing into hierarchical JSON and textbook-grounded study note generation using Google Gemini.
-Includes explicit timeouts, zero-thinking speed optimization for JSON, automatic retries, fallback models,
-smart textbook chunking/caching, and multi-threaded parallel generation.
+Supports both Google Gemini and Groq (both 100% free) for ultra-fast study note generation.
+Prioritizes ultra-fast Flash models and eliminates slow Pro models to avoid timeouts.
 """
 
 import json
@@ -11,11 +10,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Callable
 import httpx
+
+# Providers
 from google import genai
-from google.genai import types, errors
+from google.genai import types as gemini_types
+from groq import Groq
 
 
-def init_gemini_client(api_key: Optional[str] = None, timeout: float = 45.0) -> genai.Client:
+def init_gemini_client(api_key: Optional[str] = None, timeout: float = 90.0) -> genai.Client:
     """
     Initializes and returns a Google GenAI Client with an explicit network timeout.
     """
@@ -23,8 +25,17 @@ def init_gemini_client(api_key: Optional[str] = None, timeout: float = 45.0) -> 
         raise ValueError("Gemini API Key is required. Please provide it in the sidebar or via GEMINI_API_KEY environment variable.")
     return genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=timeout),
+        http_options=gemini_types.HttpOptions(timeout=timeout),
     )
+
+
+def init_groq_client(api_key: Optional[str] = None, timeout: float = 60.0) -> Groq:
+    """
+    Initializes and returns a Groq Client (100% free tier at console.groq.com).
+    """
+    if not api_key:
+        raise ValueError("Groq API Key is required. Please provide it in the sidebar or via GROQ_API_KEY environment variable.")
+    return Groq(api_key=api_key, timeout=timeout)
 
 
 def _clean_json_response(raw_text: str) -> str:
@@ -48,11 +59,11 @@ def get_relevant_textbook_context(
     textbook_text: str,
     topic_name: str,
     subtopics: List[str],
-    max_chars: int = 150000
+    max_chars: int = 120000
 ) -> str:
     """
     Optimizes payload size for speed: if textbook is huge, extracts matching pages and neighbor context.
-    If textbook is reasonably sized (<150k chars), passes full textbook.
+    If textbook is reasonably sized (<120k chars), passes full textbook.
     """
     if len(textbook_text) <= max_chars:
         return textbook_text
@@ -60,7 +71,6 @@ def get_relevant_textbook_context(
     # Split by pages if page markers are present
     if "--- Page " in textbook_text:
         pages = textbook_text.split("--- Page ")
-        # Filter keywords for search
         keywords = [k.lower() for k in [topic_name] + subtopics if len(k) > 2]
         
         matched_indices = set()
@@ -77,38 +87,63 @@ def get_relevant_textbook_context(
             combined = "--- Page " + "--- Page ".join(selected_pages)
             return combined[:max_chars]
         else:
-            # Fallback: pass first few pages (TOC / intro) so LLM can confirm missing topic
             return ("--- Page " + "--- Page ".join(pages[:6]))[:max_chars]
 
-    # If no page markers, return the first chunk
     return textbook_text[:max_chars]
 
 
 def resilient_generate_content(
-    client: genai.Client,
+    client: Any,
     contents: str,
     primary_model: str = "gemini-2.0-flash",
-    config: Optional[types.GenerateContentConfig] = None,
+    provider: str = "Google Gemini",
+    config: Optional[Any] = None,
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
-    Executes generate_content with explicit timeouts, automatic retries,
-    and automatic fallback to alternative Gemini models if 503 UNAVAILABLE, 429, or timeouts occur.
+    Executes text generation with automatic retries, backoff, and fallback models.
+    Supports both Google Gemini and Groq.
+    Notice: Excludes heavy 'Pro' models to prevent timeouts!
     """
-    candidates = [primary_model]
-    for backup in ["gemini-2.0-flash", "gemini-3.8-flash", "gemini-1.5-flash", "gemini-3.8-pro"]:
-        if backup not in candidates:
-            candidates.append(backup)
+    if provider == "Groq":
+        groq_candidates = [primary_model]
+        for alt in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+            if alt not in groq_candidates:
+                groq_candidates.append(alt)
+
+        last_error = None
+        for model_name in groq_candidates:
+            for attempt in range(2):
+                try:
+                    chat_resp = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": contents}],
+                        temperature=0.2,
+                    )
+                    return chat_resp.choices[0].message.content or ""
+                except Exception as e:
+                    last_error = e
+                    if status_callback:
+                        status_callback(f"⚠️ Groq {model_name} issue: {str(e)[:60]}... Retrying...")
+                    time.sleep(2)
+        raise last_error
+
+    # Google Gemini Provider
+    gemini_candidates = [primary_model]
+    # Fast flash models ONLY - Pro models intentionally excluded to avoid slow reasoning timeouts
+    for backup in ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-3.8-flash"]:
+        if backup not in gemini_candidates:
+            gemini_candidates.append(backup)
 
     last_error = None
     current_config = config
 
-    for model_name in candidates:
+    for model_name in gemini_candidates:
         max_attempts = 2
         for attempt in range(max_attempts):
             try:
-                if status_callback and attempt == 0 and model_name != candidates[0]:
-                    status_callback(f"Connecting to model: {model_name}...")
+                if status_callback and attempt == 0 and model_name != gemini_candidates[0]:
+                    status_callback(f"Connecting to fast model: {model_name}...")
 
                 response = client.models.generate_content(
                     model=model_name,
@@ -130,9 +165,9 @@ def resilient_generate_content(
                 )
                 last_error = e
 
-                # If thinking config is unsupported by this model, retry immediately without it
+                # If thinking config is unsupported, strip it immediately
                 if "thinking" in err_str and current_config and getattr(current_config, "thinking_config", None):
-                    current_config = types.GenerateContentConfig(temperature=current_config.temperature or 0.2)
+                    current_config = gemini_types.GenerateContentConfig(temperature=0.2)
                     continue
 
                 if is_transient:
@@ -143,9 +178,9 @@ def resilient_generate_content(
                             status_callback(f"⚠️ {model_name} was {reason}. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        if status_callback and model_name != candidates[-1]:
-                            next_model = candidates[candidates.index(model_name) + 1]
-                            status_callback(f"⚠️ {model_name} not responding. Switching to backup model: {next_model}...")
+                        if status_callback and model_name != gemini_candidates[-1]:
+                            next_model = gemini_candidates[gemini_candidates.index(model_name) + 1]
+                            status_callback(f"⚠️ {model_name} not responding. Switching to fast backup: {next_model}...")
                         time.sleep(1)
                 else:
                     raise e
@@ -154,21 +189,22 @@ def resilient_generate_content(
 
 
 def parse_syllabus_to_topics(
-    client: genai.Client,
+    client: Any,
     syllabus_text: str,
     model: str = "gemini-2.0-flash",
+    provider: str = "Google Gemini",
     status_callback: Optional[Callable[[str], None]] = None,
     *args,
     **kwargs,
 ) -> List[Dict[str, Any]]:
     """
     Prompts the LLM to parse raw syllabus text into a clean hierarchical JSON list of topics/subtopics.
-    Uses thinking_budget=0 for instant response and caps syllabus text if too large.
+    Uses thinking_budget=0 and caps syllabus text if too large.
     """
-    max_chars = 50000
+    max_chars = 40000
     cleaned_syllabus = syllabus_text[:max_chars].strip()
     if len(syllabus_text) > max_chars and status_callback:
-        status_callback(f"ℹ️ Syllabus is very large (~{len(syllabus_text):,} chars). Parsing first 50,000 chars for structure...")
+        status_callback(f"ℹ️ Syllabus is very large (~{len(syllabus_text):,} chars). Parsing first 40,000 chars for structure...")
 
     prompt = f"""
 You are an expert curriculum analyzer.
@@ -195,15 +231,16 @@ RAW SYLLABUS TEXT:
 {cleaned_syllabus}
 """
 
-    config = types.GenerateContentConfig(
+    config = gemini_types.GenerateContentConfig(
         temperature=0.1,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-    )
+        thinking_config=gemini_types.ThinkingConfig(thinking_budget=0),
+    ) if provider == "Google Gemini" else None
 
     response_text = resilient_generate_content(
         client=client,
         contents=prompt,
         primary_model=model,
+        provider=provider,
         config=config,
         status_callback=status_callback,
     )
@@ -234,11 +271,12 @@ RAW SYLLABUS TEXT:
 
 
 def generate_notes_for_topic(
-    client: genai.Client,
+    client: Any,
     topic_name: str,
     subtopics: List[str],
     textbook_text: str,
     model: str = "gemini-2.0-flash",
+    provider: str = "Google Gemini",
     status_callback: Optional[Callable[[str], None]] = None,
     *args,
     **kwargs,
@@ -266,7 +304,7 @@ CRUCIAL GROUNDING & ANTI-HALLUCINATION RULES:
    Do NOT fabricate an explanation to fill the gap.
 4. PARTIAL COVERAGE: If only parts of the topic/subtopics are covered, provide notes for the covered parts and explicitly flag which subtopics are missing.
 
-NOTES STRUCTURE (Use clean Markdown):
+NOTES STRUCTURE (Use clear Markdown):
 ## {topic_name}
 - **Overview & Core Definition**: Concise definition grounded directly in the text.
 - **Detailed Concepts & Notes**: Clear bullet points with in-depth explanation from the textbook.
@@ -278,16 +316,16 @@ TEXTBOOK TEXT:
 {relevant_context}
 """
 
-    # Zero-thinking budget makes generation 4-5x faster
-    config = types.GenerateContentConfig(
+    config = gemini_types.GenerateContentConfig(
         temperature=0.2,
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-    )
+        thinking_config=gemini_types.ThinkingConfig(thinking_budget=0),
+    ) if provider == "Google Gemini" else None
 
     response_text = resilient_generate_content(
         client=client,
         contents=prompt,
         primary_model=model,
+        provider=provider,
         config=config,
         status_callback=status_callback,
     )
@@ -296,10 +334,11 @@ TEXTBOOK TEXT:
 
 
 def generate_all_notes_parallel(
-    client: genai.Client,
+    client: Any,
     topics_list: List[Dict[str, Any]],
     textbook_text: str,
     model: str = "gemini-2.0-flash",
+    provider: str = "Google Gemini",
     max_workers: int = 4,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> str:
@@ -318,6 +357,7 @@ def generate_all_notes_parallel(
             subtopics=item["subtopics"],
             textbook_text=textbook_text,
             model=model,
+            provider=provider,
         )
         return idx, item["topic"], note
 
@@ -331,7 +371,6 @@ def generate_all_notes_parallel(
             if progress_callback:
                 progress_callback(completed_count, total, topic_name)
 
-    # Assemble sections with unit headers preserved
     assembled_sections = []
     current_unit = None
     for idx, item in enumerate(topics_list):

@@ -24,6 +24,7 @@ importlib.reload(exporter)
 from extractor import extract_text_from_pdf
 from llm_service import (
     init_gemini_client,
+    init_groq_client,
     parse_syllabus_to_topics,
     generate_notes_for_topic,
     generate_all_notes_parallel,
@@ -97,27 +98,57 @@ if "notes_editor_content" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ Settings & Keys")
     
-    # API Key Handling (Environment or Manual Input)
-    env_api_key = os.getenv("GEMINI_API_KEY", "")
-    api_key_input = st.text_input(
-        "Google Gemini API Key",
-        value=env_api_key,
-        type="password",
-        help="Get your 100% free Gemini API key from Google AI Studio (aistudio.google.com).",
+    provider_choice = st.radio(
+        "Choose AI Provider (100% Free)",
+        options=["Google Gemini", "Groq"],
+        help="Google Gemini offers large context windows. Groq offers lightning-fast (~500 tokens/sec) inference.",
     )
-    
-    if not api_key_input:
-        st.warning("⚠️ API Key required to run extraction & generation.")
-        st.markdown("[👉 Get a free Gemini API Key](https://aistudio.google.com/app/apikey)")
-    else:
-        st.success("API Key detected!")
 
-    model_choice = st.selectbox(
-        "Select Model",
-        options=["gemini-2.0-flash", "gemini-3.8-flash", "gemini-3.8-pro", "gemini-1.5-flash"],
-        index=0,
-        help="gemini-2.0-flash offers rock-solid availability and high speed. gemini-3.8-flash provides the latest capabilities.",
-    )
+    if provider_choice == "Google Gemini":
+        env_api_key = os.getenv("GEMINI_API_KEY", "")
+        api_key_input = st.text_input(
+            "Google Gemini API Key",
+            value=env_api_key,
+            type="password",
+            help="Free key from Google AI Studio (aistudio.google.com).",
+        )
+        if not api_key_input:
+            st.warning("⚠️ Gemini API Key required.")
+            st.markdown("[👉 Get a free Gemini API Key](https://aistudio.google.com/app/apikey)")
+        else:
+            st.success("Gemini API Key detected!")
+
+        model_choice = st.selectbox(
+            "Select Gemini Model",
+            options=["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-3.8-flash"],
+            index=0,
+            help="gemini-2.0-flash is recommended for ultra-fast, reliable study notes generation.",
+        )
+    else:  # Groq
+        env_api_key = os.getenv("GROQ_API_KEY", "")
+        api_key_input = st.text_input(
+            "Groq API Key",
+            value=env_api_key,
+            type="password",
+            help="Free key from Groq Console (console.groq.com).",
+        )
+        if not api_key_input:
+            st.warning("⚠️ Groq API Key required.")
+            st.markdown("[👉 Get a free Groq API Key](https://console.groq.com/keys)")
+        else:
+            st.success("Groq API Key detected!")
+
+        model_choice = st.selectbox(
+            "Select Groq Model",
+            options=["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+            index=0,
+            help="Llama 3.3 70B runs on Groq LPUs at ~500 tokens/sec with near-zero latency.",
+        )
+
+    def get_active_client(provider: str, key: str):
+        if provider == "Groq":
+            return init_groq_client(key)
+        return init_gemini_client(key)
 
     st.markdown("---")
     st.subheader("📁 Document Upload")
@@ -182,12 +213,13 @@ if syllabus_file and textbook_file:
                     def parse_status_cb(msg: str):
                         status_banner.warning(msg)
 
-                    with st.spinner("Analyzing syllabus hierarchy with LLM..."):
-                        client = init_gemini_client(api_key_input)
+                    with st.spinner(f"Analyzing syllabus hierarchy with {model_choice}..."):
+                        client = get_active_client(provider_choice, api_key_input)
                         parsed = parse_syllabus_to_topics(
                             client,
                             st.session_state.syllabus_text,
                             model=model_choice,
+                            provider=provider_choice,
                             status_callback=parse_status_cb,
                         )
                         status_banner.empty()
@@ -253,7 +285,7 @@ if syllabus_file and textbook_file:
                 status_text = st.empty()
                 
                 try:
-                    client = init_gemini_client(api_key_input)
+                    client = get_active_client(provider_choice, api_key_input)
                     total_topics = len(all_topics_to_generate)
                     doc_title_header = f"# Study Notes: {syllabus_file.name.replace('.pdf', '')}\n\n"
 
@@ -269,6 +301,7 @@ if syllabus_file and textbook_file:
                             topics_list=all_topics_to_generate,
                             textbook_text=st.session_state.textbook_text,
                             model=model_choice,
+                            provider=provider_choice,
                             max_workers=4,
                             progress_callback=on_parallel_progress,
                         )
@@ -293,6 +326,7 @@ if syllabus_file and textbook_file:
                                 subtopics=item["subtopics"],
                                 textbook_text=st.session_state.textbook_text,
                                 model=model_choice,
+                                provider=provider_choice,
                                 status_callback=gen_status_cb,
                             )
                             generated_sections.append(note_content)

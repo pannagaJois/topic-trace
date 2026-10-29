@@ -9,7 +9,7 @@ TopicTrace extracts topics from your **Course Syllabus**, cross-references and m
 ## Features
 
 - **PDF Ingestion:** Extracts clean, page-indexed text from both Syllabus and Textbook PDFs using `pypdf`.
-- **Hierarchical Syllabus Parsing:** Uses Google Gemini (`gemini-2.5-flash` / `gemini-2.0-flash`) to parse syllabus content into structured units, topics, and subtopics (JSON).
+- **Hierarchical Syllabus Parsing:** Uses Google Gemini (`gemini-3.8-flash`) to parse syllabus content into structured units, topics, and subtopics (JSON).
 - **Strict Anti-Hallucination Grounding:** Prompts ensure study notes are derived strictly from textbook content. Missing topics are prominently marked with `⚠️ Missing from Textbook`.
 - **Interactive Human Review:** Live side-by-side Markdown editor with formatted preview.
 - **Mandatory Warning Banner:** *"AI-generated content. Please verify with your textbook."*

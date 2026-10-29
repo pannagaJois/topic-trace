@@ -38,7 +38,7 @@ def _clean_json_response(raw_text: str) -> str:
     return text
 
 
-def parse_syllabus_to_topics(client: genai.Client, syllabus_text: str, model: str = "gemini-2.5-flash") -> List[Dict[str, Any]]:
+def parse_syllabus_to_topics(client: genai.Client, syllabus_text: str, model: str = "gemini-3.8-flash") -> List[Dict[str, Any]]:
     """
     Prompts the LLM to parse raw syllabus text into a clean hierarchical list of topics/subtopics.
 
@@ -120,7 +120,7 @@ def generate_notes_for_topic(
     topic_name: str,
     subtopics: List[str],
     textbook_text: str,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3.8-flash",
 ) -> str:
     """
     Generates study notes for a single topic and its subtopics, strictly grounded on the textbook text.

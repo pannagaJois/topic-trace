@@ -99,9 +99,9 @@ with st.sidebar:
 
     model_choice = st.selectbox(
         "Select Model",
-        options=["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"],
+        options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash"],
         index=0,
-        help="Gemini 2.5/2.0 Flash offer fast generation with up to 1 million tokens context.",
+        help="gemini-3.8-flash offers ultra-fast generation with up to 1 million tokens context.",
     )
 
     st.markdown("---")

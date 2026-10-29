@@ -99,9 +99,9 @@ with st.sidebar:
 
     model_choice = st.selectbox(
         "Select Model",
-        options=["gemini-3.8-flash", "gemini-3.8-pro", "gemini-3-flash", "gemini-2.0-flash", "gemini-1.5-flash"],
+        options=["gemini-2.0-flash", "gemini-3.8-flash", "gemini-3.8-pro", "gemini-1.5-flash"],
         index=0,
-        help="gemini-3.8-flash offers ultra-fast generation with up to 1 million tokens context.",
+        help="gemini-2.0-flash offers rock-solid availability and high speed. gemini-3.8-flash provides the latest capabilities.",
     )
 
     st.markdown("---")
@@ -163,14 +163,31 @@ if syllabus_file and textbook_file:
                 st.error("Please provide a Gemini API Key in the sidebar.")
             else:
                 try:
+                    status_banner = st.empty()
+                    def parse_status_cb(msg: str):
+                        status_banner.warning(msg)
+
                     with st.spinner("Analyzing syllabus hierarchy with LLM..."):
                         client = init_gemini_client(api_key_input)
-                        parsed = parse_syllabus_to_topics(client, st.session_state.syllabus_text, model=model_choice)
+                        parsed = parse_syllabus_to_topics(
+                            client,
+                            st.session_state.syllabus_text,
+                            model=model_choice,
+                            status_callback=parse_status_cb,
+                        )
+                        status_banner.empty()
                         st.session_state.parsed_units = parsed
                         st.success("Syllabus topics parsed successfully!")
                         st.rerun()
                 except Exception as e:
-                    st.error(f"Error parsing syllabus: {str(e)}")
+                    err_msg = str(e)
+                    if "503" in err_msg or "high demand" in err_msg.lower():
+                        st.error(
+                            f"Google Gemini servers are currently experiencing peak demand. "
+                            f"Please select 'gemini-2.0-flash' in the sidebar dropdown and try again."
+                        )
+                    else:
+                        st.error(f"Error parsing syllabus: {err_msg}")
     else:
         # Display Topic Tree with Selection
         st.write("Select the topics you want to generate notes for:")
@@ -225,12 +242,16 @@ if syllabus_file and textbook_file:
                         
                         status_text.text(f"Cross-referencing textbook & writing notes for [{idx + 1}/{total_topics}]: {item['topic']}...")
                         
+                        def gen_status_cb(msg: str):
+                            status_text.warning(f"[{idx + 1}/{total_topics}] {item['topic']}: {msg}")
+
                         note_content = generate_notes_for_topic(
                             client=client,
                             topic_name=item["topic"],
                             subtopics=item["subtopics"],
                             textbook_text=st.session_state.textbook_text,
                             model=model_choice,
+                            status_callback=gen_status_cb,
                         )
                         generated_sections.append(note_content)
                         generated_sections.append("\n---\n")

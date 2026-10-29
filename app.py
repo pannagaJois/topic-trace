@@ -11,6 +11,16 @@ from dotenv import load_dotenv
 # Load local environment variables from .env if present
 load_dotenv()
 
+import importlib
+import extractor
+import llm_service
+import exporter
+
+# Hot-reload child modules in Streamlit
+importlib.reload(extractor)
+importlib.reload(llm_service)
+importlib.reload(exporter)
+
 from extractor import extract_text_from_pdf
 from llm_service import init_gemini_client, parse_syllabus_to_topics, generate_notes_for_topic
 from exporter import export_markdown, export_pdf

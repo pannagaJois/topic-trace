@@ -100,8 +100,10 @@ def resilient_generate_content(
 def parse_syllabus_to_topics(
     client: genai.Client,
     syllabus_text: str,
-    model: str = "gemini-3.8-flash",
+    model: str = "gemini-2.0-flash",
     status_callback: Optional[Callable[[str], None]] = None,
+    *args,
+    **kwargs,
 ) -> List[Dict[str, Any]]:
     """
     Prompts the LLM to parse raw syllabus text into a clean hierarchical list of topics/subtopics.
@@ -171,8 +173,10 @@ def generate_notes_for_topic(
     topic_name: str,
     subtopics: List[str],
     textbook_text: str,
-    model: str = "gemini-3.8-flash",
+    model: str = "gemini-2.0-flash",
     status_callback: Optional[Callable[[str], None]] = None,
+    *args,
+    **kwargs,
 ) -> str:
     """
     Generates study notes for a single topic and its subtopics, strictly grounded on the textbook text.
